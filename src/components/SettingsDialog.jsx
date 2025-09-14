@@ -1,7 +1,7 @@
 import * as React from 'react';
 import {
     Dialog, DialogTitle, DialogContent, DialogActions,
-    Button, Stack, TextField, Typography, Alert
+    Button, Stack, TextField, Typography, Alert, MenuItem
 } from '@mui/material';
 import { CURRENCIES } from '../utils/currencies';
 
@@ -14,29 +14,35 @@ export default function SettingsDialog({ open, onClose, onSaved }) {
 
     const handleSave = async () => {
         try {
-            // Save settings to localStorage
             localStorage.setItem('ratesURL', settings.ratesURL);
             localStorage.setItem('baseCurrency', settings.baseCurrency);
-            
-            // Test the rates URL if provided
+
             if (settings.ratesURL) {
                 const response = await fetch(settings.ratesURL, { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(`Failed to fetch rates: ${response.status}`);
                 }
                 const rates = await response.json();
-                
-                // Validate the rates structure
-                if (!rates.USD || !rates.GBP || !rates.EURO || !rates.ILS) {
-                    throw new Error('Invalid rates format. Expected: {USD: 1, GBP: 1.8, EURO: 0.7, ILS: 3.4}');
+
+                // Accept EUR or EURO, USD & GBP & ILS required
+                const hasUSD = rates.USD != null;
+                const hasGBP = rates.GBP != null;
+                const eur = rates.EUR ?? rates.EURO;
+                const hasEUR = eur != null;
+                const hasILS = rates.ILS != null;
+                if (!hasUSD || !hasGBP || !hasEUR || !hasILS) {
+                    throw new Error('Invalid rates format. Expected keys: USD, GBP, EUR (or EURO), ILS');
                 }
-                
-                // Save rates to IndexedDB
+
+                // Normalize to EUR before saving
+                const normalized = { ...rates, EUR: eur };
+                delete normalized.EURO;
+
                 const { openCostsDB } = await import('../libs/idb.module.js');
                 const db = await openCostsDB();
-                await db.setRates(rates);
+                await db.setRates(normalized);
             }
-            
+
             setMessage('Settings saved successfully!');
             setTimeout(() => {
                 setMessage('');
@@ -56,30 +62,28 @@ export default function SettingsDialog({ open, onClose, onSaved }) {
                     <Typography variant="body2" sx={{ opacity: 0.8 }}>
                         Configure exchange rates and default currency.
                     </Typography>
-                    
+
                     <TextField
                         label="Exchange Rates URL"
                         value={settings.ratesURL}
-                        onChange={e => setSettings({...settings, ratesURL: e.target.value})}
+                        onChange={e => setSettings({ ...settings, ratesURL: e.target.value })}
                         placeholder="https://example.com/rates.json"
                         fullWidth
-                        helperText="URL should return JSON with format: {USD: 1, GBP: 1.8, EURO: 0.7, ILS: 3.4}"
+                        helperText="URL should return JSON like: {USD:1, GBP:1.8, EUR:0.7, ILS:3.4} (EUR or EURO accepted)"
                     />
-                    
+
                     <TextField
                         label="Default Base Currency"
                         select
                         value={settings.baseCurrency}
-                        onChange={e => setSettings({...settings, baseCurrency: e.target.value})}
+                        onChange={e => setSettings({ ...settings, baseCurrency: e.target.value })}
                         sx={{ minWidth: 200 }}
                     >
-                        {CURRENCIES.map(currency => (
-                            <option key={currency} value={currency}>{currency}</option>
-                        ))}
+                        {CURRENCIES.map(c => <MenuItem key={c} value={c}>{c}</MenuItem>)}
                     </TextField>
-                    
+
                     {message && (
-                        <Alert severity={message.includes('Error') ? 'error' : 'success'}>
+                        <Alert severity={message.startsWith('Error') ? 'error' : 'success'}>
                             {message}
                         </Alert>
                     )}

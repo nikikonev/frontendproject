@@ -2,14 +2,13 @@
 
 /**
  * IndexedDB helper for Costs + Exchange Rates
- * Fixes:
- *  - Currency normalization: canonicalizes "EURO" -> "EUR"
- *  - Correct conversion math for C_per_USD tables (USD:1)
- *  - Works with both flat maps and { base, rates } shapes
+ * - Canonicalizes "EURO" -> "EUR"
+ * - Correct conversion math for C_per_USD flat maps (USD:1)
+ * - Works with both flat maps and { base, rates } shapes
+ * - Exposes convert/getLatestRates/normalizeCurrency for UI reuse
  */
-
 export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1) {
-    // --- Small helpers ---------------------------------------------------------
+    // -- helpers ----------------------------------------------------------------
     function reqToPromise(req) {
         return new Promise((resolve, reject) => {
             req.onsuccess = () => resolve(req.result);
@@ -17,28 +16,22 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
         });
     }
 
-    // Canonicalize currency codes used throughout the app
     function normalizeCurrency(c) {
         if (!c) return 'USD';
         const up = String(c).toUpperCase().trim();
-        // Canonical form: "EUR" (not "EURO")
-        if (up === 'EURO') return 'EUR';
-        return up;
+        return up === 'EURO' ? 'EUR' : up; // canonicalize
     }
 
-    // Normalize incoming rates once when saving so our DB stays consistent
     function normalizeRatesObject(obj) {
         if (!obj || typeof obj !== 'object') return obj;
 
         // Wrapped { base, rates }
         if (obj.rates && typeof obj.rates === 'object') {
             const copy = { ...obj, rates: { ...obj.rates } };
-            // Map EURO -> EUR inside rates
             if (copy.rates.EURO != null && copy.rates.EUR == null) {
                 copy.rates.EUR = copy.rates.EURO;
                 delete copy.rates.EURO;
             }
-            // Canonicalize base as well
             if (copy.base && String(copy.base).toUpperCase() === 'EURO') copy.base = 'EUR';
             return copy;
         }
@@ -52,7 +45,7 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
         return map;
     }
 
-    // --- Open / upgrade DB -----------------------------------------------------
+    // -- open/upgrade -----------------------------------------------------------
     const openReq = indexedDB.open(databaseName, Number(databaseVersion) || 1);
     openReq.onupgradeneeded = (e) => {
         const db = e.target.result;
@@ -78,7 +71,7 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
         });
     }
 
-    // --- Rates CRUD ------------------------------------------------------------
+    // -- rates CRUD -------------------------------------------------------------
     async function setRates(rates) {
         const normalized = normalizeRatesObject(rates);
         return withStore('readwrite', (s) =>
@@ -87,7 +80,10 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
     }
 
     async function getLatestRates() {
-        return withStore('readonly', async (s) => (await reqToPromise(s.rates.get('latest')))?.rates || null);
+        return withStore('readonly', async (s) => {
+            const row = await reqToPromise(s.rates.get('latest'));
+            return row && row.rates ? normalizeRatesObject(row.rates) : null; // normalize on read too
+        });
     }
 
     async function fetchRatesFromURL() {
@@ -96,67 +92,47 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
         const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) throw new Error(`rates fetch failed ${res.status}`);
         const json = await res.json();
-        await setRates(json); // normalize on save
+        await setRates(json); // normalized on save
         return json;
     }
 
     async function ensureRates() {
         let rates = await getLatestRates();
         if (!rates) {
-            try { rates = await fetchRatesFromURL(); } catch { /* ignore */ }
+            try { rates = await fetchRatesFromURL(); } catch {}
         }
-        return rates; // can be null
+        return rates || null;
     }
 
-    // --- Conversion ------------------------------------------------------------
-    /**
-     * Convert amount FROM -> TO
-     * Supports:
-     *  A) Flat map with USD=1 (C_per_USD), e.g. { USD:1, ILS:3.4, EUR:0.7 }
-     *  B) Wrapped { base:'USD', rates:{...} } where rates[X] = X_per_base
-     *
-     * For both shapes, the correct formula is:
-     *   value = amount * (rate[to] / rate[from])
-     */
+    // -- conversion (central truth) --------------------------------------------
     function convert(amount, from, to, rates) {
-        if (!isFinite(amount) || !rates) return amount;
+        const amt = Number(amount);
+        if (!isFinite(amt) || !rates) return amt;
 
-        // Wrapped shape: { base, rates }
-        if (rates && typeof rates === 'object' && rates.rates && typeof rates.rates === 'object') {
+        // Wrapped { base, rates } where rates[X] = X_per_base
+        if (rates && rates.rates && typeof rates.rates === 'object') {
+            const base = String(rates.base || 'USD').toUpperCase();
             const table = rates.rates;
-            const base = (rates.base || 'USD').toUpperCase();
             const f = normalizeCurrency(from);
             const t = normalizeCurrency(to);
-
             const rFrom = Number(f === base ? 1 : table[f]);
-            const rTo = Number(t === base ? 1 : table[t]);
-            if (!isFinite(rFrom) || !isFinite(rTo)) return amount;
-
-            const value = amount * (rTo / rFrom);
-            return Math.round((value + Number.EPSILON) * 100) / 100;
+            const rTo   = Number(t === base ? 1 : table[t]);
+            if (!isFinite(rFrom) || !isFinite(rTo)) return amt;
+            return Math.round(((amt * (rTo / rFrom)) + Number.EPSILON) * 100) / 100;
         }
 
-        // Flat map (your current public/rates.json)
+        // Flat map (USD=1): { USD:1, ILS:3.4, EUR:0.7, ... }
         const table = rates;
         const f = normalizeCurrency(from);
         const t = normalizeCurrency(to);
-
-        // Support legacy 'EURO' key just in case older data sneaks in
-        const get = (k) => {
-            if (table[k] != null) return Number(table[k]);
-            if (k === 'EUR' && table['EURO'] != null) return Number(table['EURO']);
-            return NaN;
-        };
-
+        const get = (k) => (table[k] != null ? Number(table[k]) : NaN);
         const rFrom = get(f);
-        const rTo = get(t);
-        if (!isFinite(rFrom) || !isFinite(rTo)) return amount;
-
-        const value = amount * (rTo / rFrom); // ✅ correct for C_per_USD (USD=1)
-        return Math.round((value + Number.EPSILON) * 100) / 100;
+        const rTo   = get(t);
+        if (!isFinite(rFrom) || !isFinite(rTo)) return amt;
+        return Math.round(((amt * (rTo / rFrom)) + Number.EPSILON) * 100) / 100; // ✅ correct
     }
 
-    // --- Costs API -------------------------------------------------------------
+    // -- costs API --------------------------------------------------------------
     async function addCost(cost) {
         const now = new Date();
         const rec = {
@@ -177,8 +153,7 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
     async function getReport(year, month, currency) {
         const y = Number(year), m = Number(month);
         const cur = normalizeCurrency(currency || 'USD');
-
-        const rates = await ensureRates(); // may be null if not set / failed to fetch
+        const rates = await ensureRates();
 
         const items = await withStore('readonly', async (s) => {
             const idx = s.costs.index('by_year_month');
@@ -203,7 +178,6 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
             });
         });
 
-        // Convert each row exactly once into the requested currency, then sum
         const totalNum = items.reduce(
             (acc, it) => acc + (rates ? convert(it.sum, it.currency, cur, rates) : it.sum),
             0
@@ -213,6 +187,6 @@ export async function openCostsDB(databaseName = 'costsdb', databaseVersion = 1)
         return { year: y, month: m, costs: items, total: { currency: cur, total } };
     }
 
-    // Keep public API same as before
-    return { addCost, getReport, setRates };
+    // expose helpers so UI can reuse a single source of truth
+    return { addCost, getReport, setRates, getLatestRates, convert, normalizeCurrency };
 }

@@ -24,30 +24,12 @@ export default function PieChartView() {
         (async () => {
             try {
                 const rep = await api.getReport(year, month, base);
-                
-                // Get rates for conversion
-                let rates = { USD: 1 };
-                try {
-                    const db = await new Promise((res, rej) => {
-                        const r = indexedDB.open('costsdb', 1);
-                        r.onsuccess = () => res(r.result);
-                        r.onerror = () => rej(r.error);
-                    });
-                    const tx = db.transaction('rates', 'readonly');
-                    const store = tx.objectStore('rates');
-                    const row = await new Promise((res, rej) => {
-                        const rq = store.get('latest');
-                        rq.onsuccess = () => res(rq.result);
-                        rq.onerror = () => rej(rq.error);
-                    });
-                    if (row?.rates) rates = row.rates;
-                } catch {}
-                
+                const rates = await api.getLatestRates();
+
                 const byCat = new Map();
                 for (const it of rep.costs) {
+                    const converted = rates ? api.convert(it.sum, it.currency, base, rates) : it.sum;
                     const k = it.category || 'other';
-                    // Convert to base currency if needed
-                    const converted = convert(it.sum, it.currency, base, rates);
                     byCat.set(k, (byCat.get(k) || 0) + converted);
                 }
                 setData(Array.from(byCat, ([name, value]) => ({ name, value })));
@@ -56,13 +38,6 @@ export default function PieChartView() {
             }
         })();
     }, [api, year, month, base]);
-    
-    const convert = (sum, from, to, rates) => {
-        if (!rates) return sum;
-        const rFrom = rates[from === 'EUR' ? 'EURO' : from], rTo = rates[to === 'EUR' ? 'EURO' : to];
-        if (!isFinite(rFrom) || !isFinite(rTo)) return sum;
-        return (sum * rFrom) / rTo;
-    };
 
     const years = Array.from({ length: 6 }, (_, i) => now.getFullYear() - i);
 

@@ -23,44 +23,18 @@ export default function ReportView() {
 
     useEffect(() => { openCostsDB().then(setApi).catch(e => setErr(String(e))); }, []);
 
-    const norm = (c) => (c === 'EUR' ? 'EURO' : c);
-    const convert = (sum, from, to, rates) => {
-        if (!rates) return sum;
-        const rFrom = rates[norm(from)], rTo = rates[norm(to)];
-        if (!isFinite(rFrom) || !isFinite(rTo)) return sum;
-        // Convert: amount * (USD_per_from / USD_per_to)
-        return (sum * rFrom) / rTo;
-    };
-
     useEffect(() => {
         if (!api) return;
         setErr('');
         (async () => {
             try {
                 const rep = await api.getReport(year, month, base);
-
-                // safe rates read (in case store isn't there yet)
-                let rates = { USD: 1 };
-                try {
-                    const db = await new Promise((res, rej) => {
-                        const r = indexedDB.open('costsdb', 1);
-                        r.onsuccess = () => res(r.result);
-                        r.onerror = () => rej(r.error);
-                    });
-                    const tx = db.transaction('rates', 'readonly');
-                    const store = tx.objectStore('rates');
-                    const row = await new Promise((res, rej) => {
-                        const rq = store.get('latest');
-                        rq.onsuccess = () => res(rq.result);
-                        rq.onerror = () => rej(rq.error);
-                    });
-                    if (row?.rates) rates = row.rates;
-                } catch {}
+                const rates = await api.getLatestRates();
 
                 const enhanced = rep.costs.map(it => ({
                     ...it,
-                    converted: convert(it.sum, it.currency, base, rates),
-                    date: new Date(it.year || new Date().getFullYear(), (it.month || new Date().getMonth() + 1) - 1, it.Date?.day || new Date().getDate())
+                    converted: rates ? api.convert(it.sum, it.currency, base, rates) : it.sum,
+                    date: new Date(rep.year, rep.month - 1, it.Date?.day || 1),
                 }));
 
                 setRows(enhanced);
@@ -131,7 +105,6 @@ export default function ReportView() {
 
             {err && <Alert severity="error" sx={{ mb: 2 }}>{err}</Alert>}
 
-            {/* Light grey frosted TABLE — even more transparent */}
             <Paper
                 elevation={0}
                 sx={{
@@ -192,7 +165,6 @@ export default function ReportView() {
                 </Box>
             </Paper>
 
-            {/* Frosted footer total — same transparency system as table */}
             <Paper
                 elevation={0}
                 sx={{
