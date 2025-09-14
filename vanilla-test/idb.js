@@ -1,4 +1,4 @@
-/* idb.js — Vanilla IndexedDB wrapper (global) */
+/* idb.js — Vanilla IndexedDB wrapper (global, fixed math + EUR normalization) */
 (function (global) {
     'use strict';
 
@@ -41,12 +41,39 @@
                 });
             }
 
+            // ---- Currency + Rates normalization -----------------------------------
             function normalizeCurrency(c) {
                 if (!c) return 'USD';
                 var up = String(c).toUpperCase().trim();
-                return up === 'EUR' ? 'EURO' : up; // assignment uses EURO key
+                // Canonical: use EUR everywhere; accept EURO as alias
+                if (up === 'EURO') return 'EUR';
+                return up;
             }
 
+            function normalizeRatesObject(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+
+                // Wrapped { base, rates }
+                if (obj.rates && typeof obj.rates === 'object') {
+                    var copy = { base: obj.base, rates: Object.assign({}, obj.rates) };
+                    if (copy.base && String(copy.base).toUpperCase() === 'EURO') copy.base = 'EUR';
+                    if (copy.rates.EURO != null && copy.rates.EUR == null) {
+                        copy.rates.EUR = copy.rates.EURO;
+                        delete copy.rates.EURO;
+                    }
+                    return copy;
+                }
+
+                // Flat map
+                var map = Object.assign({}, obj);
+                if (map.EURO != null && map.EUR == null) {
+                    map.EUR = map.EURO;
+                    delete map.EURO;
+                }
+                return map;
+            }
+
+            // ---- Public API: costs -------------------------------------------------
             function addCost(cost) {
                 if (!cost || typeof cost !== 'object') {
                     return Promise.reject(new Error('cost must be an object'));
@@ -54,7 +81,7 @@
                 var now = new Date();
                 var sum = Number(cost.sum);
                 if (!isFinite(sum)) return Promise.reject(new Error('sum must be a number'));
-                var currency = normalizeCurrency(cost.currency || cost.curency || 'USD'); // tolerate "curency" typo from sample
+                var currency = normalizeCurrency(cost.currency || cost.curency || 'USD'); // tolerate "curency" typo
                 var category = String(cost.category || 'General');
                 var description = String(cost.description || '');
 
@@ -81,13 +108,14 @@
                 });
             }
 
+            // ---- Public API: rates -------------------------------------------------
             function setRates(ratesObj) {
-                // Example: { USD:1, GBP:1.8, EURO:0.7, ILS:3.4 }
                 if (!ratesObj || typeof ratesObj !== 'object') {
                     return Promise.reject(new Error('rates must be an object'));
                 }
+                var normalized = normalizeRatesObject(ratesObj);
                 return withStore('readwrite', function (s) {
-                    s.rates.put({ id: 'latest', updatedAt: Date.now(), rates: ratesObj });
+                    s.rates.put({ id: 'latest', updatedAt: Date.now(), rates: normalized });
                     return true;
                 });
             }
@@ -101,17 +129,47 @@
                 });
             }
 
-            // Convert using USD-per-1-unit-of-currency semantics (assignment style).
-            // Example rates: { USD:1, GBP:1.8, EURO:0.7, ILS:3.4 } => 1 GBP = 1.8 USD
-            // Formula: amount_in_target = (amount * USD_per_FROM) / USD_per_TO
+            // ---- Conversion (shape-aware, correct math) ---------------------------
+            // Supports:
+            //  A) flat map with USD=1 (C_per_USD), e.g. { USD:1, ILS:3.4, EUR:0.7 }
+            //  B) wrapped { base:'USD', rates:{...} } where rates[X] = X_per_base
+            //
+            // Correct formula for both shapes:
+            //   amount_in_to = amount * (rate[to] / rate[from])
             function convertAmount(sum, from, to, rates) {
-                if (!rates) return Number(sum);
-                from = normalizeCurrency(from);
-                to = normalizeCurrency(to);
-                var rFrom = Number(rates[from]);
-                var rTo = Number(rates[to]);
-                if (!isFinite(rFrom) || !isFinite(rTo)) return Number(sum); // if missing, fall back to raw sum
-                return (Number(sum) * rFrom) / rTo; // FROM -> USD -> TO
+                var amount = Number(sum);
+                if (!isFinite(amount) || !rates) return amount;
+
+                // Wrapped { base, rates }
+                if (rates && typeof rates === 'object' && rates.rates && typeof rates.rates === 'object') {
+                    var tableW = rates.rates;
+                    var base = (rates.base || 'USD').toUpperCase();
+                    var fW = normalizeCurrency(from);
+                    var tW = normalizeCurrency(to);
+                    var rFromW = Number(fW === base ? 1 : tableW[fW]);
+                    var rToW   = Number(tW === base ? 1 : tableW[tW]);
+                    if (!isFinite(rFromW) || !isFinite(rToW)) return amount;
+                    var vW = amount * (rToW / rFromW);
+                    return Math.round((vW + Number.EPSILON) * 100) / 100;
+                }
+
+                // Flat map (your current public/rates.json)
+                var table = rates;
+                var f = normalizeCurrency(from);
+                var t = normalizeCurrency(to);
+
+                function get(k) {
+                    if (table[k] != null) return Number(table[k]);
+                    if (k === 'EUR' && table['EURO'] != null) return Number(table['EURO']); // legacy alias
+                    return NaN;
+                }
+
+                var rFrom = get(f);
+                var rTo   = get(t);
+                if (!isFinite(rFrom) || !isFinite(rTo)) return amount;
+
+                var v = amount * (rTo / rFrom); // ✅ correct for C_per_USD (USD:1)
+                return Math.round((v + Number.EPSILON) * 100) / 100;
             }
 
             function getReport(year, month, currency) {
@@ -135,7 +193,6 @@
                                 var cursor = ev.target.result;
                                 if (cursor) {
                                     var v = cursor.value;
-                                    // Keep original amounts & currencies per spec
                                     items.push({
                                         sum: v.sum,
                                         currency: v.currency,
@@ -145,7 +202,6 @@
                                     });
                                     cursor.continue();
                                 } else {
-                                    // finished
                                     var totalNum = items.reduce(function (acc, it) {
                                         return acc + convertAmount(it.sum, it.currency, cur, rates);
                                     }, 0);
