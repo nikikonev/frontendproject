@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>idb.js Test</title>
+    <style>
+        body { font-family: system-ui, Arial, sans-serif; padding: 16px; }
+        button { padding: 8px 12px; }
+        pre { background: #111; color: #eee; padding: 12px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+<h1>Vanilla idb.js Test</h1>
+<p>
+    <button id="seed">Seed 2 Items + Show Report</button>
+</p>
+<pre id="log"></pre>
+
+<script src="idb.js"></script>
+<script>
+    const logEl = document.getElementById('log');
+    const log = (m) => { logEl.textContent += m + '\n'; };
+
+    (async () => {
+        // Open DB
+        const db = await idb.openCostsDB('costsdb', 1);
+        log('DB opened.');
+
+        // Set example rates (same structure as assignment)
+        await db.setRates({ USD:1, GBP:1.8, EURO:0.7, ILS:3.4 });
+        log('Rates saved.');
+
+        document.getElementById('seed').onclick = async () => {
+            try {
+                // Add two costs (today’s date is implicit)
+                const r1 = await db.addCost({ sum:200, currency:'USD', category:'FOOD', description:'pizza' });
+                const r2 = await db.addCost({ sum:400, currency:'USD', category:'CAR', description:'fuel' });
+                log('Added 1: ' + JSON.stringify(r1));
+                log('Added 2: ' + JSON.stringify(r2));
+
+                // Build a USD report for current month
+                const now = new Date();
+                const rep = await db.getReport(now.getFullYear(), now.getMonth()+1, 'USD');
+                log('Report:\n' + JSON.stringify(rep, null, 2));
+            } catch (e) {
+                console.error(e);
+                log('Error: ' + e.message);
+            }
+        };
+    })();
+</script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>idb.js Test</title>
+    <style>
+        body { font-family: system-ui, Arial, sans-serif; padding: 16px; background: #f5f5f5; }
+        button { padding: 8px 12px; margin: 4px; }
+        pre { background: #111; color: #eee; padding: 12px; border-radius: 8px; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+<h1>Vanilla idb.js Test</h1>
+<p>
+    <button id="test1">Test 1: Add Costs</button>
+    <button id="test2">Test 2: Get Report</button>
+    <button id="test3">Test 3: Set Rates</button>
+    <button id="clear">Clear Log</button>
+</p>
+<pre id="log"></pre>
+
+<script src="vanilla-test/idb.js"></script>
+<script>
+    const logEl = document.getElementById('log');
+    const log = (m, className = '') => { 
+        const div = document.createElement('div');
+        div.textContent = m;
+        if (className) div.className = className;
+        logEl.appendChild(div);
+    };
+
+    (async () => {
+        try {
+            // Open DB
+            const db = await idb.openCostsDB('testdb', 1);
+            log('✓ DB opened successfully', 'success');
+
+            // Set example rates
+            await db.setRates({ USD:1, GBP:1.8, EURO:0.7, ILS:3.4 });
+            log('✓ Rates saved successfully', 'success');
+
+            document.getElementById('test1').onclick = async () => {
+                try {
+                    const r1 = await db.addCost({ sum:200, currency:'USD', category:'FOOD', description:'pizza' });
+                    log('✓ Added cost 1: ' + JSON.stringify(r1), 'success');
+                    
+                    const r2 = await db.addCost({ sum:100, currency:'GBP', category:'TRANSPORT', description:'bus ticket' });
+                    log('✓ Added cost 2: ' + JSON.stringify(r2), 'success');
+                } catch (e) {
+                    log('✗ Error adding costs: ' + e.message, 'error');
+                }
+            };
+
+            document.getElementById('test2').onclick = async () => {
+                try {
+                    const now = new Date();
+                    const rep = await db.getReport(now.getFullYear(), now.getMonth()+1, 'USD');
+                    log('✓ Report generated:');
+                    log(JSON.stringify(rep, null, 2));
+                } catch (e) {
+                    log('✗ Error getting report: ' + e.message, 'error');
+                }
+            };
+
+            document.getElementById('test3').onclick = async () => {
+                try {
+                    await db.setRates({ USD:1, GBP:2.0, EURO:0.8, ILS:3.5 });
+                    log('✓ Rates updated successfully', 'success');
+                } catch (e) {
+                    log('✗ Error setting rates: ' + e.message, 'error');
+                }
+            };
+
+            document.getElementById('clear').onclick = () => {
+                logEl.innerHTML = '';
+            };
+
+        } catch (e) {
+            log('✗ Failed to initialize: ' + e.message, 'error');
+        }
+    })();
+</script>
+</body>
+</html>

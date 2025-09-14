@@ -1,0 +1,33 @@
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background:
+          radial-gradient(1200px 800px at 15% 10%, rgba(0,191,165,0.08), transparent 60%),
+          radial-gradient(1000px 700px at 85% 30%, rgba(38,198,218,0.06), transparent 60%),
+          linear-gradient(180deg, #0a0b0c 0%, #0c0d0f 60%, #0a0b0c 100%);
+  background-attachment: fixed;
+  background-size: cover;
+  color: #fff;
+  margin: 0;
+  font-family: Inter, Roboto, Segoe UI, Arial, sans-serif;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+          radial-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+          radial-gradient(rgba(0,0,0,0.06) 1px, transparent 1px);
+  background-size: 3px 3px, 5px 5px;
+  mix-blend-mode: overlay;
+  opacity: 0.35;
+  z-index: -1; /* keep it behind for backdrop-filter to work */
+}
+
+table, thead, tbody, tr, th, td {
+  background: transparent !important;
+}
