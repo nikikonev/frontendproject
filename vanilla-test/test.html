@@ -2,52 +2,58 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>idb.js Test</title>
+    <title>IDB Test</title>
     <style>
-        body { font-family: system-ui, Arial, sans-serif; padding: 16px; }
-        button { padding: 8px 12px; }
-        pre { background: #111; color: #eee; padding: 12px; border-radius: 8px; }
+        body { font-family: Arial, sans-serif; margin: 2rem; }
+        .log { margin-bottom: 0.5rem; }
+        pre { background: #f5f5f5; padding: 1rem; border-radius: 5px; }
     </style>
 </head>
 <body>
-<h1>Vanilla idb.js Test</h1>
-<p>
-    <button id="seed">Seed 2 Items + Show Report</button>
-</p>
-<pre id="log"></pre>
+<h1>IDB.js Test</h1>
+<div id="output"></div>
 
 <script src="idb.js"></script>
 <script>
-    const logEl = document.getElementById('log');
-    const log = (m) => { logEl.textContent += m + '\n'; };
+    function log(message) {
+        console.log(message);
+        const out = document.getElementById("output");
+        const div = document.createElement("div");
+        div.className = "log";
+        div.textContent = message;
+        out.appendChild(div);
+    }
 
-    (async () => {
-        // Open DB
-        const db = await idb.openCostsDB('costsdb', 1);
-        log('DB opened.');
+    function logObject(obj) {
+        console.log(obj);
+        const out = document.getElementById("output");
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(obj, null, 2);
+        out.appendChild(pre);
+    }
 
-        // Set example rates (same structure as assignment)
-        await db.setRates({ USD:1, GBP:1.8, EURO:0.7, ILS:3.4 });
-        log('Rates saved.');
+    async function test() {
+        try {
+            const db = await idb.openCostsDB("costsdb", 1);
 
-        document.getElementById('seed').onclick = async () => {
-            try {
-                // Add two costs (today’s date is implicit)
-                const r1 = await db.addCost({ sum:200, currency:'USD', category:'FOOD', description:'pizza' });
-                const r2 = await db.addCost({ sum:400, currency:'USD', category:'CAR', description:'fuel' });
-                log('Added 1: ' + JSON.stringify(r1));
-                log('Added 2: ' + JSON.stringify(r2));
+            await db.addCost({ sum: 200, currency: "USD", category: "FOOD", description: "pizza" });
+            await db.addCost({ sum: 400, currency: "USD", category: "CAR", description: "fuel" });
 
-                // Build a USD report for current month
-                const now = new Date();
-                const rep = await db.getReport(now.getFullYear(), now.getMonth()+1, 'USD');
-                log('Report:\n' + JSON.stringify(rep, null, 2));
-            } catch (e) {
-                console.error(e);
-                log('Error: ' + e.message);
-            }
-        };
-    })();
+            log("Costs added successfully.");
+
+            // Fetch a report for current month/year in USD
+            const now = new Date();
+            const report = await db.getReport(now.getFullYear(), now.getMonth() + 1, "USD");
+
+            log("Report returned:");
+            logObject(report);
+
+        } catch (e) {
+            log("Error: " + e.message);
+        }
+    }
+
+    test();
 </script>
 </body>
 </html>

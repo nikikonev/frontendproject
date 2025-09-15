@@ -1,190 +1,95 @@
-/* idb.js — Vanilla IndexedDB wrapper (global, fixed math + EUR normalization) */
+// vanilla-test/idb.js — Vanilla (global) IndexedDB wrapper (EURO-consistent)
 (function (global) {
     'use strict';
 
-    // Promisify an IDBRequest
-    function reqToPromise(req) {
+    var DB_DEFAULT_NAME = 'costsdb';
+    var DB_VERSION = 1;
+    var COSTS_STORE = 'costs';
+    var RATES_STORE = 'rates';
+
+    function promisifyRequest(req) {
         return new Promise(function (resolve, reject) {
             req.onsuccess = function () { resolve(req.result); };
-            req.onerror = function () { reject(req.error); };
+            req.onerror = function () { reject(req.error || new Error('IndexedDB error')); };
         });
     }
 
-    // ---- Currency + Rates normalization -----------------------------------
+    function withStore(db, storeName, mode, fn) {
+        return new Promise(function (resolve, reject) {
+            var tx = db.transaction(storeName, mode);
+            var store = tx.objectStore(storeName);
+            var res = fn(store, tx);
+            tx.oncomplete = function () { resolve(res); };
+            tx.onerror = function () { reject(tx.error || new Error('Transaction failed')); };
+            tx.onabort = function () { reject(tx.error || new Error('Transaction aborted')); };
+        });
+    }
+
     function normalizeCurrency(c) {
-        if (!c) return 'USD';
-        var up = String(c).toUpperCase().trim();
-        // Canonical: use EUR everywhere; accept EURO as alias
-        if (up === 'EURO') return 'EUR';
-        return up;
-    }
-
-    function normalizeRatesObject(obj) {
-        if (!obj || typeof obj !== 'object') return obj;
-
-        // Wrapped { base, rates }
-        if (obj.rates && typeof obj.rates === 'object') {
-            var copy = { base: obj.base, rates: Object.assign({}, obj.rates) };
-            if (copy.base && String(copy.base).toUpperCase() === 'EURO') copy.base = 'EUR';
-            if (copy.rates.EURO != null && copy.rates.EUR == null) {
-                copy.rates.EUR = copy.rates.EURO;
-                delete copy.rates.EURO;
-            }
-            return copy;
-        }
-
-        // Flat map
-        var map = Object.assign({}, obj);
-        if (map.EURO != null && map.EUR == null) {
-            map.EUR = map.EURO;
-            delete map.EURO;
-        }
-        return map;
-    }
-
-    // ---- Conversion (shape-aware, correct math) ---------------------------
-    // Supports:
-    //  A) flat map with USD=1 (C_per_USD), e.g. { USD:1, ILS:3.4, EUR:0.7 }
-    //  B) wrapped { base:'USD', rates:{...} } where rates[X] = X_per_base
-    //
-    // Correct formula for both shapes:
-    //   amount_in_to = amount * (rate[to] / rate[from])
-    function convertAmount(sum, from, to, rates) {
-        var amount = Number(sum);
-        if (!isFinite(amount) || !rates) return amount;
-
-        // Wrapped { base, rates }
-        if (rates && rates.rates && typeof rates.rates === 'object') {
-            var base = String(rates.base || 'USD').toUpperCase();
-            var tableW = rates.rates;
-            var fW = normalizeCurrency(from);
-            var tW = normalizeCurrency(to);
-            var rFromW = Number(fW === base ? 1 : tableW[fW]);
-            var rToW   = Number(tW === base ? 1 : tableW[tW]);
-            if (!isFinite(rFromW) || !isFinite(rToW)) return amount;
-            return Math.round(((amount * (rToW / rFromW)) + Number.EPSILON) * 100) / 100;
-        }
-
-        // Flat map (USD=1)
-        var table = rates;
-        var f = normalizeCurrency(from);
-        var t = normalizeCurrency(to);
-        function get(k) {
-            if (table[k] != null) return Number(table[k]);
-            if (k === 'EUR' && table['EURO'] != null) return Number(table['EURO']); // legacy alias
-            return NaN;
-        }
-        var rFrom = get(f);
-        var rTo   = get(t);
-        if (!isFinite(rFrom) || !isFinite(rTo)) return amount;
-        return Math.round(((amount * (rTo / rFrom)) + Number.EPSILON) * 100) / 100; // ✅
+        var u = String(c || '').toUpperCase();
+        if (u === 'EUR') return 'EURO';
+        return u;
     }
 
     function openCostsDB(databaseName, databaseVersion) {
-        if (typeof databaseName !== 'string') {
-            return Promise.reject(new Error('databaseName must be a string'));
-        }
-        var version = Number(databaseVersion) || 1;
-        var openReq = indexedDB.open(databaseName, version);
+        return new Promise(function (resolve, reject) {
+            var name = typeof databaseName === 'string' ? databaseName : DB_DEFAULT_NAME;
+            var version = Number(databaseVersion) || DB_VERSION;
 
-        // Create / upgrade schema
-        openReq.onupgradeneeded = function (e) {
-            var db = e.target.result;
-            if (!db.objectStoreNames.contains('costs')) {
-                var costs = db.createObjectStore('costs', { keyPath: 'id', autoIncrement: true });
-                costs.createIndex('by_year_month', ['year', 'month'], { unique: false });
-                costs.createIndex('by_category', 'category', { unique: false });
-            }
-            if (!db.objectStoreNames.contains('rates')) {
-                db.createObjectStore('rates', { keyPath: 'id' });
-            }
-        };
+            var req = indexedDB.open(name, version);
 
-        return reqToPromise(openReq).then(function (db) {
-            function withStore(mode, cb) {
-                return new Promise(function (resolve, reject) {
-                    var tx = db.transaction(['costs', 'rates'], mode);
-                    var stores = { costs: tx.objectStore('costs'), rates: tx.objectStore('rates') };
-                    var out = cb(stores);
-                    tx.oncomplete = function () { resolve(out); };
-                    tx.onerror = function () { reject(tx.error); };
-                });
-            }
+            req.onupgradeneeded = function (e) {
+                var db = e.target.result;
 
-            // ---- Public API: costs -------------------------------------------------
-            function addCost(cost) {
-                if (!cost || typeof cost !== 'object') {
-                    return Promise.reject(new Error('cost must be an object'));
-                }
-                var now = new Date();
-                var sum = Number(cost.sum);
-                if (!isFinite(sum)) return Promise.reject(new Error('sum must be a number'));
-                var currency = normalizeCurrency(cost.currency || cost.curency || 'USD'); // tolerate "curency" typo
-                var category = String(cost.category || 'General');
-                var description = String(cost.description || '');
-
-                var record = {
-                    sum: sum,
-                    currency: currency,
-                    category: category,
-                    description: description,
-                    ts: now.getTime(),
-                    year: now.getFullYear(),
-                    month: now.getMonth() + 1,
-                    day: now.getDate()
-                };
-
-                return withStore('readwrite', function (s) {
-                    s.costs.add(record);
-                    // Return shape per spec: the newly added cost item (without date fields)
-                    return {
-                        sum: record.sum,
-                        currency: record.currency,
-                        category: record.category,
-                        description: record.description
-                    };
-                });
-            }
-
-            // ---- Public API: rates -------------------------------------------------
-            function setRates(ratesObj) {
-                if (!ratesObj || typeof ratesObj !== 'object') {
-                    return Promise.reject(new Error('rates must be an object'));
-                }
-                var normalized = normalizeRatesObject(ratesObj);
-                return withStore('readwrite', function (s) {
-                    s.rates.put({ id: 'latest', updatedAt: Date.now(), rates: normalized });
-                    return true;
-                });
-            }
-
-            function getLatestRates() {
-                return withStore('readonly', function (s) {
-                    var req = s.rates.get('latest');
-                    return reqToPromise(req).then(function (row) {
-                        return row && row.rates ? normalizeRatesObject(row.rates) : null; // ✅ normalize on read
-                    });
-                });
-            }
-
-            function getReport(year, month, currency) {
-                var y = Number(year), m = Number(month);
-                var cur = normalizeCurrency(currency || 'USD');
-                if (!isFinite(y) || !isFinite(m)) {
-                    return Promise.reject(new Error('year and month must be numbers'));
+                if (!db.objectStoreNames.contains(COSTS_STORE)) {
+                    var store = db.createObjectStore(COSTS_STORE, { keyPath: 'id', autoIncrement: true });
+                    store.createIndex('by_year_month', ['year', 'month'], { unique: false });
+                    store.createIndex('by_category', 'category', { unique: false });
+                    store.createIndex('by_ts', 'ts', { unique: false });
                 }
 
-                return getLatestRates().then(function (rates) {
-                    return withStore('readonly', function (s) {
-                        var idx = s.costs.index('by_year_month');
-                        var KR = (typeof IDBKeyRange !== 'undefined' ? IDBKeyRange : (self && self.IDBKeyRange));
-                        var range = KR.only([y, m]);
-                        var cursorReq = idx.openCursor(range);
+                if (!db.objectStoreNames.contains(RATES_STORE)) {
+                    db.createObjectStore(RATES_STORE, { keyPath: 'id' });
+                }
+            };
 
-                        return new Promise(function (resolve, reject) {
-                            var items = [];
-                            cursorReq.onerror = function () { reject(cursorReq.error); };
-                            cursorReq.onsuccess = function (ev) {
+            req.onerror = function () { reject(req.error || new Error('Failed to open IndexedDB')); };
+            req.onsuccess = function () {
+                var db = req.result;
+
+                var api = {
+                    addCost: function (cost) {
+                        var now = new Date();
+                        var record = {
+                            sum: Number(cost.sum),
+                            currency: normalizeCurrency(cost.currency),
+                            category: String(cost.category),
+                            description: String(cost.description),
+                            ts: now.getTime(),
+                            year: now.getFullYear(),
+                            month: now.getMonth() + 1,
+                            day: now.getDate(),
+                        };
+                        return withStore(db, COSTS_STORE, 'readwrite', function (store) {
+                            store.add(record);
+                        }).then(function () {
+                            return {
+                                sum: record.sum,
+                                currency: record.currency,
+                                category: record.category,
+                                description: record.description,
+                            };
+                        });
+                    },
+
+                    getReport: function (year, month, currency) {
+                        var base = normalizeCurrency(currency);
+                        var items = [];
+                        return withStore(db, COSTS_STORE, 'readonly', function (store) {
+                            var idx = store.index('by_year_month');
+                            var range = IDBKeyRange.only([Number(year), Number(month)]);
+                            var req2 = idx.openCursor(range);
+                            req2.onsuccess = function (ev) {
                                 var cursor = ev.target.result;
                                 if (cursor) {
                                     var v = cursor.value;
@@ -193,41 +98,80 @@
                                         currency: v.currency,
                                         category: v.category,
                                         description: v.description,
-                                        Date: { day: v.day }
+                                        Date: { day: v.day },
                                     });
                                     cursor.continue();
-                                } else {
-                                    var totalNum = items.reduce(function (acc, it) {
-                                        return acc + (rates ? convertAmount(it.sum, it.currency, cur, rates) : it.sum);
-                                    }, 0);
-                                    var report = {
-                                        year: y,
-                                        month: m,
-                                        costs: items,
-                                        total: { currency: cur, total: Math.round(totalNum * 100) / 100 }
-                                    };
-                                    resolve(report);
                                 }
                             };
+                        }).then(function () {
+                            return api.getLatestRates().then(function (rates) {
+                                var total = items.reduce(function (acc, it) {
+                                    return acc + api.convert(it.sum, it.currency, base, rates);
+                                }, 0);
+                                return {
+                                    year: Number(year),
+                                    month: Number(month),
+                                    costs: items,
+                                    total: { currency: base, total: Math.round(total * 100) / 100 },
+                                };
+                            });
                         });
-                    });
-                });
-            }
+                    },
 
-            return {
-                // main app API
-                addCost: addCost,
-                getReport: getReport,
-                setRates: setRates,
-                // testing helpers (handy in console)
-                getLatestRates: getLatestRates,
-                convertAmount: convertAmount,
-                normalizeCurrency: normalizeCurrency
+                    setRates: function (r) {
+                        var payload = {
+                            id: 'latest',
+                            USD: Number(r.USD || 1),
+                            GBP: Number(r.GBP || 1),
+                            EURO: Number(r.EURO || 1),
+                            ILS: Number(r.ILS || 1),
+                            ts: Date.now(),
+                        };
+                        return withStore(db, RATES_STORE, 'readwrite', function (store) {
+                            store.put(payload);
+                        }).then(function () { return payload; });
+                    },
+
+                    getLatestRates: function () {
+                        return withStore(db, RATES_STORE, 'readonly', function (store) {
+                            return promisifyRequest(store.get('latest'));
+                        }).then(function (row) {
+                            if (row && typeof row === 'object') {
+                                return {
+                                    USD: Number(row.USD || 1),
+                                    GBP: Number(row.GBP || 1),
+                                    EURO: Number(row.EURO || 1),
+                                    ILS: Number(row.ILS || 1),
+                                };
+                            }
+                            return { USD: 1, GBP: 1, EURO: 1, ILS: 1 };
+                        });
+                    },
+
+                    convert: function (amount, from, to, rates) {
+                        var f = normalizeCurrency(from);
+                        var t = normalizeCurrency(to);
+                        if (!rates) throw new Error('Rates are required for conversion');
+                        if (f === t) return Number(amount) || 0;
+                        var rateFrom = Number(rates[f]);
+                        var rateTo = Number(rates[t]);
+                        if (!isFinite(rateFrom) || !isFinite(rateTo) || rateFrom <= 0) {
+                            throw new Error('Invalid rates for conversion ' + f + ' -> ' + t);
+                        }
+                        var val = (Number(amount) || 0) * (rateTo / rateFrom);
+                        return Math.round(val * 100) / 100;
+                    },
+
+                    normalizeCurrency: normalizeCurrency,
+                };
+
+                resolve(api);
             };
         });
     }
 
-    // expose global "idb" with openCostsDB
-    global.idb = { openCostsDB: openCostsDB };
-
-})(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));
+    // Expose global `idb` as required by the brief
+    global.idb = {
+        openCostsDB: openCostsDB,
+    };
+})(typeof window !== 'undefined' ? window : globalThis);

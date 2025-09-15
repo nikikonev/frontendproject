@@ -1,97 +1,149 @@
-import * as React from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Dialog, DialogTitle, DialogContent, DialogActions,
-    Button, Stack, TextField, Typography, Alert, MenuItem
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogActions,
+    TextField,
+    MenuItem,
+    Button,
+    Stack,
+    Typography,
 } from '@mui/material';
-import { CURRENCIES } from '../utils/currencies';
+import { openCostsDB } from '../libs/idb.module.js'; // <-- add this import
 
-export default function SettingsDialog({ open, onClose, onSaved }) {
-    const [settings, setSettings] = React.useState({
-        ratesURL: localStorage.getItem('ratesURL') || '',
-        baseCurrency: localStorage.getItem('baseCurrency') || 'USD'
-    });
-    const [message, setMessage] = React.useState('');
+// Minimal helper to coerce numbers safely
+function toNum(v, fallback = 1) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
-    const handleSave = async () => {
+/**
+ * SettingsDialog
+ * Props:
+ * - open: boolean
+ * - onClose: () => void
+ * - onSaved?: () => void
+ * - api?: object with setRates(normalized), optional now (we lazy-init if missing)
+ */
+export default function SettingsDialog({ open, onClose, onSaved, api }) {
+    const [ratesUrl, setRatesUrl] = useState('');
+    const [baseCurrency, setBaseCurrency] = useState('USD');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+
+    // Keep a resolved API here (from prop or from lazy open)
+    const apiRef = useRef(null);
+
+    // Load saved prefs each time dialog opens
+    useEffect(() => {
+        if (!open) return;
+        setErr('');
+        const savedUrl = localStorage.getItem('ratesUrl') || '/rates.json';
+        const savedBase = localStorage.getItem('baseCurrency') || 'USD';
+        setRatesUrl(savedUrl);
+        setBaseCurrency(savedBase);
+    }, [open]);
+
+    // Ensure we have an API (use prop if provided; otherwise open our own once)
+    useEffect(() => {
+        let cancelled = false;
+
+        async function ensureApi() {
+            try {
+                if (api && typeof api.setRates === 'function') {
+                    apiRef.current = api;
+                    return;
+                }
+                // Lazily open our own if missing
+                const localApi = await openCostsDB(); // uses defaults
+                if (!cancelled) apiRef.current = localApi;
+            } catch (e) {
+                if (!cancelled) setErr(e?.message || 'Failed to init database API.');
+            }
+        }
+
+        if (open) ensureApi();
+        return () => { cancelled = true; };
+    }, [open, api]);
+
+    async function handleSave() {
+        setErr('');
+        setBusy(true);
         try {
-            localStorage.setItem('ratesURL', settings.ratesURL);
-            localStorage.setItem('baseCurrency', settings.baseCurrency);
+            // Persist the preferences
+            localStorage.setItem('ratesUrl', ratesUrl);
+            localStorage.setItem('baseCurrency', baseCurrency);
 
-            if (settings.ratesURL) {
-                const response = await fetch(settings.ratesURL, { cache: 'no-store' });
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch rates: ${response.status}`);
-                }
-                const rates = await response.json();
+            // Fetch rates JSON (avoid stale cache)
+            const res = await fetch(ratesUrl, { mode: 'cors', cache: 'no-store' });
+            if (!res.ok) throw new Error(`Failed to fetch rates: HTTP ${res.status}`);
+            const raw = await res.json();
 
-                // Accept EUR or EURO, USD & GBP & ILS required
-                const hasUSD = rates.USD != null;
-                const hasGBP = rates.GBP != null;
-                const eur = rates.EUR ?? rates.EURO;
-                const hasEUR = eur != null;
-                const hasILS = rates.ILS != null;
-                if (!hasUSD || !hasGBP || !hasEUR || !hasILS) {
-                    throw new Error('Invalid rates format. Expected keys: USD, GBP, EUR (or EURO), ILS');
-                }
+            // Accept either flat or wrapped under { rates: { ... } }
+            const src = (raw && typeof raw.rates === 'object' && raw.rates) ? raw.rates : raw;
 
-                // Normalize to EUR before saving
-                const normalized = { ...rates, EUR: eur };
-                delete normalized.EURO;
+            // Normalize keys exactly as the brief requires: USD, ILS, GBP, EURO
+            // Accept EUR (maps to EURO) and lowercase keys.
+            const normalized = {
+                USD: toNum(src.USD ?? src.usd ?? 1),
+                GBP: toNum(src.GBP ?? src.gbp ?? 1),
+                EURO: toNum(src.EURO ?? src.EUR ?? src.euro ?? 1),
+                ILS: toNum(src.ILS ?? src.ils ?? 1),
+            };
 
-                const { openCostsDB } = await import('../libs/idb.module.js');
-                const db = await openCostsDB();
-                await db.setRates(normalized);
+            const realApi = apiRef.current;
+            if (!realApi || typeof realApi.setRates !== 'function') {
+                throw new Error('API not available: setRates missing.');
             }
 
-            setMessage('Settings saved successfully!');
-            setTimeout(() => {
-                setMessage('');
-                onSaved?.();
-                onClose();
-            }, 1000);
-        } catch (error) {
-            setMessage(`Error: ${error.message}`);
+            await realApi.setRates(normalized);
+
+            onSaved?.();
+            onClose?.();
+        } catch (e) {
+            setErr(e?.message || 'Unknown error while saving settings.');
+        } finally {
+            setBusy(false);
         }
-    };
+    }
 
     return (
-        <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+        <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
             <DialogTitle>Settings</DialogTitle>
-            <DialogContent dividers>
-                <Stack spacing={2}>
-                    <Typography variant="body2" sx={{ opacity: 0.8 }}>
-                        Configure exchange rates and default currency.
-                    </Typography>
-
+            <DialogContent>
+                <Stack spacing={2} sx={{ mt: 1 }}>
                     <TextField
-                        label="Exchange Rates URL"
-                        value={settings.ratesURL}
-                        onChange={e => setSettings({ ...settings, ratesURL: e.target.value })}
-                        placeholder="https://example.com/rates.json"
+                        label="Rates JSON URL"
+                        value={ratesUrl}
+                        onChange={(e) => setRatesUrl(e.target.value)}
+                        helperText="URL that returns a JSON with keys: USD, GBP, EURO (or EUR), ILS"
                         fullWidth
-                        helperText="URL should return JSON like: {USD:1, GBP:1.8, EUR:0.7, ILS:3.4} (EUR or EURO accepted)"
                     />
-
                     <TextField
-                        label="Default Base Currency"
                         select
-                        value={settings.baseCurrency}
-                        onChange={e => setSettings({ ...settings, baseCurrency: e.target.value })}
-                        sx={{ minWidth: 200 }}
+                        label="Default currency"
+                        value={baseCurrency}
+                        onChange={(e) => setBaseCurrency(e.target.value)}
+                        fullWidth
                     >
-                        {CURRENCIES.map(c => <MenuItem key={c} value={c}>{c}</MenuItem>)}
+                        {['USD', 'ILS', 'GBP', 'EURO'].map((c) => (
+                            <MenuItem key={c} value={c}>{c}</MenuItem>
+                        ))}
                     </TextField>
 
-                    {message && (
-                        <Alert severity={message.startsWith('Error') ? 'error' : 'success'}>
-                            {message}
-                        </Alert>
-                    )}
+                    {err ? (
+                        <Typography variant="body2" color="error">
+                            {err}
+                        </Typography>
+                    ) : null}
                 </Stack>
             </DialogContent>
             <DialogActions>
-                <Button onClick={onClose}>Cancel</Button>
-                <Button variant="contained" onClick={handleSave}>Save</Button>
+                <Button onClick={onClose} disabled={busy}>Cancel</Button>
+                <Button onClick={handleSave} variant="contained" disabled={busy}>
+                    Save
+                </Button>
             </DialogActions>
         </Dialog>
     );
